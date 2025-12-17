@@ -12,8 +12,8 @@ import json
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Lector Blindado", layout="wide")
-st.title("🚗 Escáner de Tarjetas (Modo Seguro)")
+st.set_page_config(page_title="Scanner Pro", layout="wide")
+st.title("🚗 Escáner de Tarjetas (Algoritmo de Contraste)")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -23,36 +23,34 @@ if not api_key:
     st.stop()
 
 # ==========================================
-# --- FUNCIONES DE VISIÓN (MEJORADAS Y SEGURAS) ---
+# --- NUEVA VISIÓN ARTIFICIAL (TIPO CAMSCANNER) ---
 # ==========================================
 
 def ordenar_puntos(pts):
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
+    rect[0] = pts[np.argmin(s)] # Arriba-Izq
+    rect[2] = pts[np.argmax(s)] # Abajo-Der
     diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
+    rect[1] = pts[np.argmin(diff)] # Arriba-Der
+    rect[3] = pts[np.argmax(diff)] # Abajo-Izq
     return rect
 
 def transformar_perspectiva(image, pts):
     rect = ordenar_puntos(pts)
     (tl, tr, br, bl) = rect
     
-    # Calcular dimensiones con seguridad
+    # Calcular ancho máximo
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
     maxWidth = max(int(widthA), int(widthB))
     
+    # Calcular alto máximo
     heightA = np.sqrt(((tr[1] - br[1]) ** 2) + ((tr[0] - br[0]) ** 2))
     heightB = np.sqrt(((tl[1] - bl[1]) ** 2) + ((tl[0] - bl[0]) ** 2))
     maxHeight = max(int(heightA), int(heightB))
     
-    # Validación anti-error gris: Si el recorte es minúsculo, abortamos
-    if maxWidth < 50 or maxHeight < 50:
-        raise ValueError("Recorte demasiado pequeño")
-
+    # Matriz de destino
     dst = np.array([
         [0, 0],
         [maxWidth - 1, 0],
@@ -63,68 +61,74 @@ def transformar_perspectiva(image, pts):
     warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
     return warped
 
-def mejora_final_color(img_cv2):
-    # Aumentar contraste y brillo de forma segura
-    img_cv2 = cv2.convertScaleAbs(img_cv2, alpha=1.2, beta=15)
-    return img_cv2
-
 def detectar_y_recortar_tarjeta(image_pil):
     try:
+        # Convertir a formato OpenCV
         img_orig = np.array(image_pil)
-        img_cv = cv2.cvtColor(img_orig, cv2.COLOR_RGB2BGR)
-        original_h, original_w = img_cv.shape[:2]
-        area_total = original_h * original_w
-
-        # 1. Preprocesamiento
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edged = cv2.Canny(blurred, 30, 150) # Ajustado para ignorar ruido fino
-
-        # 2. Contornos
-        contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:3] # Solo los 3 más grandes
+        img = cv2.cvtColor(img_orig, cv2.COLOR_RGB2BGR)
+        original_h, original_w = img.shape[:2]
         
-        card_contour = None
+        # 1. Preprocesamiento agresivo para ignorar brillos
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (7, 7), 0)
+        
+        # USAMOS THRESHOLD ADAPTATIVO en vez de Canny
+        # Esto separa el fondo oscuro de la tarjeta clara
+        thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY, 11, 2)
+        
+        # Invertimos si la tarjeta es clara sobre fondo oscuro (para tener contornos blancos)
+        thresh = cv2.bitwise_not(thresh)
+        
+        # "Dilatar" para cerrar huecos causados por letras negras o brillos
+        kernel = np.ones((5,5), np.uint8)
+        dilated = cv2.dilate(thresh, kernel, iterations=2)
+        
+        # 2. Encontrar contornos en la imagen binaria
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+        
+        target_contour = None
         
         for c in contours:
             area = cv2.contourArea(c)
-            # REGLA DE SEGURIDAD 1: Si el contorno es menor al 10% de la imagen, es ruido. Ignorar.
-            if area < (area_total * 0.10):
+            # Filtro: Debe ser al menos el 15% de la imagen
+            if area < (original_h * original_w * 0.15):
                 continue
-
+                
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
             
             if len(approx) == 4:
-                card_contour = approx
+                target_contour = approx
                 break
         
-        # 3. Decisión
-        if card_contour is not None:
-            pts = card_contour.reshape(4, 2)
-            try:
-                warped = transformar_perspectiva(img_cv, pts)
-                
-                # REGLA DE SEGURIDAD 2: Verificar aspecto (que no sea una tira fina)
-                h, w = warped.shape[:2]
-                if h > 0 and w > 0:
-                    aspect_ratio = w / h
-                    # Las tarjetas suelen ser rectangulares (ratio entre 1.3 y 1.8 aprox)
-                    # Si el ratio es muy loco (ej. 0.1 o 10), el recorte falló.
-                    if 0.5 < aspect_ratio < 3.0:
-                        st.toast("✅ Recorte exitoso.")
-                        warped = mejora_final_color(warped)
-                        return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
-            except Exception:
-                pass # Si falla el warp, seguimos al fallback
-
-        # FALLBACK (Plan B): Si no se pudo recortar bien, usamos la original mejorada
-        st.toast("⚠️ Fondo complejo: Usando imagen completa (Seguro).")
-        img_improved = mejora_final_color(img_cv)
-        return Image.fromarray(cv2.cvtColor(img_improved, cv2.COLOR_BGR2RGB))
-        
+        if target_contour is not None:
+            pts = target_contour.reshape(4, 2)
+            warped = transformar_perspectiva(img, pts)
+            
+            # Verificación extra: El resultado debe ser horizontal (aprox)
+            h, w = warped.shape[:2]
+            if h > w: # Si salió vertical, la rotamos
+                 warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
+            
+            st.toast("✅ Recorte inteligente exitoso.")
+            # Mejora final de imagen recortada
+            warped = cv2.convertScaleAbs(warped, alpha=1.2, beta=10)
+            return Image.fromarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB))
+            
+        else:
+            # PLAN B MEJORADO: Recorte central
+            # Si no encuentra bordes, recorta el 10% de cada lado para quitar mesa
+            st.toast("⚠️ Borde difuso. Aplicando recorte central.")
+            margin_y = int(original_h * 0.10)
+            margin_x = int(original_w * 0.10)
+            cropped = img[margin_y:original_h-margin_y, margin_x:original_w-margin_x]
+            cropped = cv2.convertScaleAbs(cropped, alpha=1.2, beta=15)
+            return Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
+            
     except Exception as e:
-        st.error(f"Error procesando imagen: {e}")
+        print(f"Error cv2: {e}")
         return image_pil
 
 # ==========================================
@@ -132,7 +136,6 @@ def detectar_y_recortar_tarjeta(image_pil):
 # ==========================================
 
 
-# --- API GOOGLE ---
 def encontrar_modelo_activo(key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
     try:
@@ -140,8 +143,6 @@ def encontrar_modelo_activo(key):
         if response.status_code != 200: return 'gemini-1.5-flash'
         data = response.json()
         candidatos = [m['name'].replace('models/', '') for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-        
-        # Prioridad
         for m in candidatos: 
             if 'flash' in m and 'legacy' not in m: return m
         if candidatos: return candidatos[0]
@@ -156,10 +157,9 @@ def extraer_datos_http(image_pil, key):
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     prompt_text = """
-    Analiza esta tarjeta de circulación mexicana. Extrae en JSON:
+    Analiza esta tarjeta de circulación. Extrae datos en JSON:
     'Propietario', 'Placa', 'Serie_VIN', 'Marca', 'Modelo', 'Año', 'Motor'.
-    Si algún dato no es visible, pon "ILEGIBLE".
-    Responde SOLAMENTE el JSON.
+    Si no es visible, pon "ILEGIBLE".
     """
     
     data = {"contents": [{"parts": [{"text": prompt_text}, {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}]}]}
@@ -176,27 +176,38 @@ def extraer_datos_http(image_pil, key):
                 if "```json" in texto: texto = texto.split("```json")[1].split("```")[0]
                 elif "```" in texto: texto = texto.split("```")[1].split("```")[0]
                 return json.loads(texto)
-            except:
-                return None
+            except: return None
         return None
-    except Exception:
-        return None
+    except: return None
 
-# --- PDF ---
 def generar_pdf(image_pil):
     pdf = FPDF(orientation='P', unit='mm', format='Letter')
     pdf.add_page()
-    pdf_w = 190
-    img_w, img_h = image_pil.size
-    pdf_h = (img_h * pdf_w) / img_w
-    if pdf_h > 130:
-        pdf_h = 130
-        pdf_w = (img_w * pdf_h) / img_h
-    x_pos = (216 - pdf_w) / 2
     
+    # Lógica para ocupar media hoja superior (aprox 140mm alto max)
+    pdf_w_max = 190
+    pdf_h_max = 130
+    
+    img_w, img_h = image_pil.size
+    
+    # Calcular factor de escala para ajustar al ancho
+    ratio = pdf_w_max / img_w
+    final_w = pdf_w_max
+    final_h = img_h * ratio
+    
+    # Si la altura se pasa de media hoja, ajustamos por altura
+    if final_h > pdf_h_max:
+        ratio = pdf_h_max / img_h
+        final_h = pdf_h_max
+        final_w = img_w * ratio
+
+    # Centrar horizontalmente
+    x_pos = (216 - final_w) / 2
+    y_pos = 15 
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-        image_pil.save(tmp.name, quality=95)
-        pdf.image(tmp.name, x=x_pos, y=10, w=pdf_w, h=pdf_h) 
+        image_pil.save(tmp.name, quality=100)
+        pdf.image(tmp.name, x=x_pos, y=y_pos, w=final_w, h=final_h) 
         
     return pdf.output(dest='S').encode('latin1')
 
@@ -210,25 +221,20 @@ if uploaded_file is not None:
         st.image(image, caption="Original", use_container_width=True)
     
     if st.button("Procesar Imagen"):
-        with st.spinner('Procesando...'):
-            # Paso 1: Intentar recortar, pero si falla, devolver la original mejorada
+        with st.spinner('Analizando estructura y recortando...'):
             img_procesada = detectar_y_recortar_tarjeta(image)
             
             with col2:
-                st.image(img_procesada, caption="Resultado (Recorte o Mejora)", use_container_width=True)
+                st.image(img_procesada, caption="Resultado Final", use_container_width=True)
             
-            # Paso 2: Leer datos de la imagen resultante
             datos = extraer_datos_http(img_procesada, api_key)
             
             if datos:
                 df = pd.DataFrame([datos])
                 def color_rojo(val):
                     return 'background-color: #ffcccc; color: red; font-weight: bold' if str(val).upper() == 'ILEGIBLE' else ''
-                st.subheader("Datos Extraídos")
+                st.subheader("Datos")
                 st.dataframe(df.style.map(color_rojo))
-            else:
-                st.error("No se pudieron leer datos. Intenta una foto con menos reflejo.")
             
-            # Paso 3: PDF
             pdf_bytes = generar_pdf(img_procesada)
-            st.download_button("Descargar PDF", pdf_bytes, "tarjeta_final.pdf", "application/pdf")
+            st.download_button("Descargar PDF", pdf_bytes, "tarjeta_recortada.pdf", "application/pdf")
