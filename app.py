@@ -3,7 +3,7 @@ import requests
 import base64
 import cv2
 import numpy as np
-from PIL import Image, ImageEnhance
+from PIL import Image
 import pandas as pd
 from fpdf import FPDF
 import io
@@ -12,7 +12,7 @@ import json
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Lector de Tarjetas", layout="wide")
-st.title("🚗 Escáner de Tarjetas (Calidad Natural)")
+st.title("🚗 Escáner de Tarjetas (Versión Actualizada)")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -21,33 +21,31 @@ if not api_key:
     st.warning("Ingresa tu API Key en la barra lateral para comenzar.")
     st.stop()
 
-# --- FUNCIONES DE IMAGEN (MEJORADA Y SUAVE) ---
+# --- FUNCIONES DE IMAGEN (NATURAL) ---
 def mejorar_imagen(image_pil):
     # Convertir a array numpy
     img = np.array(image_pil)
     
-    # 1. Ajuste Básico de Brillo y Contraste (Sin filtros agresivos)
-    # alpha = contraste (1.0 es original, 1.2 es un poco más)
-    # beta = brillo (sumar luz)
+    # 1. Ajuste Básico de Brillo y Contraste
+    # Aumentamos ligeramente el contraste (1.1) y el brillo (10)
     img = cv2.convertScaleAbs(img, alpha=1.1, beta=10)
 
-    # 2. Enfoque MUY sutil (Unsharp Masking suave)
-    gaussian_3 = cv2.GaussianBlur(img, (0, 0), 2.0)
-    img = cv2.addWeighted(img, 1.2, gaussian_3, -0.2, 0)
+    # 2. Enfoque MUY sutil para definir letras
+    gaussian = cv2.GaussianBlur(img, (0, 0), 2.0)
+    img = cv2.addWeighted(img, 1.2, gaussian, -0.2, 0)
     
     return Image.fromarray(img)
 
-# --- FUNCION OCR (CON DIAGNÓSTICO DE ERROR) ---
+# --- FUNCION OCR (CON REPORTE DE ERRORES REAL) ---
 def extraer_datos_http(image_pil, key):
     buffered = io.BytesIO()
     image_pil.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    # Lista de modelos priorizando los más estables
+    # SOLO usamos modelos que existen HOY (Diciembre 2025)
     modelos_posibles = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-pro-vision"
+        "gemini-1.5-flash",    # El más rápido y estable para texto
+        "gemini-1.5-pro",      # El más potente (backup)
     ]
 
     prompt_text = """
@@ -69,7 +67,8 @@ def extraer_datos_http(image_pil, key):
     }
     headers = {'Content-Type': 'application/json'}
 
-    ultimo_error = ""
+    # Variable para guardar TODOS los errores y mostrártelos
+    errores_acumulados = []
 
     for modelo in modelos_posibles:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={key}"
@@ -80,28 +79,37 @@ def extraer_datos_http(image_pil, key):
             if response.status_code == 200:
                 result = response.json()
                 try:
+                    # Intentar leer la respuesta
                     texto = result['candidates'][0]['content']['parts'][0]['text']
+                    
+                    # Limpiar JSON (quitar ```json y ```)
                     if "```json" in texto:
                         texto = texto.split("```json")[1].split("```")[0]
                     elif "```" in texto:
                         texto = texto.split("```")[1].split("```")[0]
-                    return json.loads(texto) # Éxito
-                except:
+                    
+                    return json.loads(texto) # ¡ÉXITO!
+                except Exception as e:
+                    errores_acumulados.append(f"Modelo {modelo} respondió pero falló al leer el JSON: {str(e)}")
                     continue
             else:
-                # Guardamos el mensaje de error real de Google para mostrártelo
-                error_json = response.json()
-                mensaje = error_json.get('error', {}).get('message', response.text)
-                ultimo_error = f"Modelo {modelo} falló con: {mensaje}"
+                # Si Google da error (ej. 400, 403, 404, 429)
+                error_info = response.json()
+                mensaje = error_info.get('error', {}).get('message', response.text)
+                errores_acumulados.append(f"Modelo {modelo} dió error {response.status_code}: {mensaje}")
                 continue
 
         except Exception as e:
-            ultimo_error = str(e)
+            errores_acumulados.append(f"Fallo de conexión con {modelo}: {str(e)}")
             continue
 
-    # Si llegamos aquí, falló todo. Mostramos el error real.
-    st.error(f"❌ Error de conexión con Google: {ultimo_error}")
-    st.info("💡 Pista: Si dice 'API key not valid', revisa que no falten letras. Si dice 'Not Found', intenta de nuevo más tarde.")
+    # Si llegamos aquí, NINGUNO funcionó. Mostramos el reporte completo.
+    st.error("❌ No se pudo procesar la imagen.")
+    with st.expander("Ver detalles técnicos del error (Importante)"):
+        for error in errores_acumulados:
+            st.write(f"- {error}")
+            
+    st.info("💡 Solución probable: Si el error dice 'API key not valid', revisa tu clave. Si dice 'User location is not supported', intenta usar una VPN o revisa la configuración de tu cuenta.")
     return None
 
 # --- PDF ---
@@ -110,7 +118,7 @@ def generar_pdf(image_pil):
     pdf.add_page()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         image_pil.save(tmp.name)
-        # Ajuste para media carta (aprox 215mm ancho x 140mm alto)
+        # Ajuste para media carta
         pdf.image(tmp.name, x=10, y=10, w=195, h=120) 
     pdf.set_font("Arial", size=12)
     pdf.text(10, 140, "Copia de Tarjeta de Circulación - Procesada")
@@ -128,7 +136,7 @@ if uploaded_file is not None:
     
     if st.button("Procesar Imagen"):
         with st.spinner('Procesando...'):
-            # 1. Mejorar imagen (Suave)
+            # 1. Mejorar imagen
             img_mejorada = mejorar_imagen(image)
             with col2:
                 st.image(img_mejorada, caption="Mejorada (Natural)", use_container_width=True)
