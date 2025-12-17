@@ -1,5 +1,5 @@
 import streamlit as st
-from streamlit_cropper import st_cropper # LIBRERÍA NUEVA
+from streamlit_cropper import st_cropper
 import requests
 import base64
 import cv2
@@ -13,8 +13,8 @@ import json
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Scanner Manual", layout="wide")
-st.title("✂️ Escáner Manual (Estilo CamScanner)")
+st.set_page_config(page_title="Scanner Manual Pro", layout="wide")
+st.title("✂️ Escáner de Alta Precisión")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -24,34 +24,21 @@ if not api_key:
     st.stop()
 
 # ==========================================
-# --- FUNCIONES DE MEJORA (POST-RECORTE) ---
+# --- MEJORA DE IMAGEN (SOLO LUZ, SIN BORRAR DETALLES) ---
 # ==========================================
 
-def mejora_final_color(image_pil):
-    # Convertir a OpenCV
+def mejora_natural(image_pil):
+    # Convertimos a OpenCV
     img = np.array(image_pil)
     
-    # 1. Aumentar nitidez y contraste (Ya que el usuario recortó bien)
-    # Convertir a LAB para mejorar solo la luminosidad
-    img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    # Solo ajustamos un poco el brillo y contraste para que no se vea oscura
+    # No usamos filtros de desenfoque ni "pintura al oleo"
+    img = cv2.convertScaleAbs(img, alpha=1.1, beta=10) # alpha=1.1 (poquito contraste), beta=10 (poquito brillo)
     
-    # CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    cl = clahe.apply(l)
-    
-    merged = cv2.merge((cl,a,b))
-    img_final = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
-    
-    # Un poco de enfoque suave
-    kernel = np.array([[0, -1, 0], [-1, 5,-1], [0, -1, 0]])
-    img_final = cv2.filter2D(src=img_final, ddepth=-1, kernel=kernel)
-    
-    return Image.fromarray(img_final)
+    return Image.fromarray(img)
 
 # ==========================================
-# --- FUNCIONES DE CONEXIÓN A GOOGLE ---
+# --- CONEXIÓN GOOGLE (OCR) ---
 # ==========================================
 
 def encontrar_modelo_activo(key):
@@ -71,7 +58,7 @@ def encontrar_modelo_activo(key):
 def extraer_datos_http(image_pil, key):
     modelo_elegido = encontrar_modelo_activo(key)
     buffered = io.BytesIO()
-    image_pil.save(buffered, format="JPEG")
+    image_pil.save(buffered, format="JPEG", quality=100) # Calidad máxima
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     prompt_text = """
@@ -125,53 +112,52 @@ def generar_pdf(image_pil):
     return pdf.output(dest='S').encode('latin1')
 
 # --- INTERFAZ ---
-uploaded_file = st.file_uploader("1. Sube la foto original", type=['jpg', 'png', 'jpeg'])
+
+st.info("1. Sube tu foto y recorta manualmente la tarjeta.")
+uploaded_file = st.file_uploader("Subir imagen", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
     
-    # --- COLUMNA DE RECORTE (IZQUIERDA) ---
-    col1, col2 = st.columns([1, 1])
+    # --- ÁREA DE RECORTE (PANTALLA COMPLETA) ---
+    st.write("### 2. Ajusta el recuadro rojo")
+    st.caption("Usa las esquinas para seleccionar la tarjeta. Ahora tienes más espacio.")
     
-    with col1:
-        st.subheader("2. Ajusta el recuadro rojo")
-        st.info("Mueve las esquinas del cuadro rojo para seleccionar SOLO la tarjeta.")
+    # EL CAMBIO CLAVE: Quitamos las columnas.
+    # box_color='red' es el color del cuadro.
+    # aspect_ratio=None permite cualquier forma (no fuerza cuadrado).
+    cropped_img = st_cropper(image, realtime_update=True, box_color='#FF0000', aspect_ratio=None)
+    
+    st.write("---")
+    
+    # Botón grande
+    if st.button("✅ RECORTAR Y EXTRAER DATOS", type="primary", use_container_width=True):
         
-        # WIDGET DE RECORTE (streamlit-cropper)
-        # realtime_update=True hace que veas el resultado al instante
-        cropped_img = st_cropper(image, realtime_update=True, box_color='#FF0000', aspect_ratio=None)
+        # --- RESULTADOS (AQUÍ SÍ USAMOS COLUMNAS) ---
+        col_res1, col_res2 = st.columns([1, 1])
         
-        st.caption("La imagen recortada se ve a la derecha ->")
-
-    # --- COLUMNA DE RESULTADO (DERECHA) ---
-    with col2:
-        st.subheader("3. Vista Previa")
-        # Mostrar lo que el usuario está recortando
-        st.image(cropped_img, caption="Así quedará tu tarjeta", use_container_width=True)
-        
-        st.write("---")
-        # Botón maestro
-        if st.button("✅ Confirmar Recorte y Extraer Datos", type="primary"):
+        with st.spinner('Procesando imagen en alta calidad...'):
+            # 1. Mejora sutil (respetando calidad original)
+            img_final = mejora_natural(cropped_img)
             
-            with st.spinner('Mejorando calidad y leyendo textos...'):
-                # 1. Aplicar filtros de mejora a la imagen YA recortada por el humano
-                img_final = mejora_final_color(cropped_img)
-                
-                # Mostrar versión HD
-                st.image(img_final, caption="Imagen Mejorada (HD)", use_container_width=True)
-                
-                # 2. Leer datos
-                datos = extraer_datos_http(img_final, api_key)
-                
+            with col_res1:
+                st.subheader("Imagen Final")
+                st.image(img_final, caption="Tarjeta Lista", use_container_width=True)
+            
+            # 2. Leer datos
+            datos = extraer_datos_http(img_final, api_key)
+            
+            with col_res2:
+                st.subheader("Datos Detectados")
                 if datos:
                     df = pd.DataFrame([datos])
                     def color_rojo(val):
                         return 'background-color: #ffcccc; color: red; font-weight: bold' if str(val).upper() == 'ILEGIBLE' else ''
-                    st.success("¡Lectura Completada!")
                     st.dataframe(df.style.map(color_rojo))
                 else:
-                    st.error("No se pudieron extraer datos. Revisa que el recorte no corte letras.")
+                    st.error("No se pudieron extraer datos. Verifica que el recorte incluya el texto.")
 
-                # 3. PDF
-                pdf_bytes = generar_pdf(img_final)
-                st.download_button("Descargar PDF Listo", pdf_bytes, "tarjeta_imprimir.pdf", "application/pdf")
+            # 3. PDF
+            pdf_bytes = generar_pdf(img_final)
+            st.success("¡Proceso terminado!")
+            st.download_button("⬇️ Descargar PDF Listo para Imprimir", pdf_bytes, "tarjeta_imprimir.pdf", "application/pdf", use_container_width=True)
