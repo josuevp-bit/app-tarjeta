@@ -11,8 +11,8 @@ import tempfile
 import json
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Lector de Tarjetas", layout="wide")
-st.title("🚗 Escáner de Tarjetas (Versión Actualizada)")
+st.set_page_config(page_title="Lector Inteligente", layout="wide")
+st.title("🚗 Escáner de Tarjetas (Auto-Detección)")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -21,32 +21,60 @@ if not api_key:
     st.warning("Ingresa tu API Key en la barra lateral para comenzar.")
     st.stop()
 
-# --- FUNCIONES DE IMAGEN (NATURAL) ---
-def mejorar_imagen(image_pil):
-    # Convertir a array numpy
-    img = np.array(image_pil)
+# --- 1. FUNCIÓN PARA DESCUBRIR MODELOS DISPONIBLES ---
+def obtener_mejor_modelo(key):
+    """Pregunta a Google qué modelos tiene habilitada esta llave"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            # Filtramos solo los que sirven para generar contenido
+            modelos_disponibles = []
+            for m in data.get('models', []):
+                if 'generateContent' in m.get('supportedGenerationMethods', []):
+                    # Guardamos el nombre limpio (sin 'models/')
+                    nombre = m['name'].replace('models/', '')
+                    modelos_disponibles.append(nombre)
+            
+            # Lógica de preferencia: Buscamos el mejor disponible
+            prioridades = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro', 'gemini-pro', 'gemini-pro-vision']
+            
+            for p in prioridades:
+                for m in modelos_disponibles:
+                    if p in m: # Si encontramos uno de nuestros preferidos
+                        return m
+            
+            # Si no hay ninguno de los conocidos, devolvemos el primero que haya
+            if modelos_disponibles:
+                return modelos_disponibles[0]
+                
+    except Exception as e:
+        print(f"Error listando modelos: {e}")
     
-    # 1. Ajuste Básico de Brillo y Contraste
-    # Aumentamos ligeramente el contraste (1.1) y el brillo (10)
-    img = cv2.convertScaleAbs(img, alpha=1.1, beta=10)
+    # Si todo falla, regresamos el estándar por defecto
+    return 'gemini-1.5-flash'
 
-    # 2. Enfoque MUY sutil para definir letras
+# --- 2. FUNCIONES DE IMAGEN ---
+def mejorar_imagen(image_pil):
+    img = np.array(image_pil)
+    # Ajuste suave de luz y contraste
+    img = cv2.convertScaleAbs(img, alpha=1.1, beta=10)
+    # Enfoque suave
     gaussian = cv2.GaussianBlur(img, (0, 0), 2.0)
     img = cv2.addWeighted(img, 1.2, gaussian, -0.2, 0)
-    
     return Image.fromarray(img)
 
-# --- FUNCION OCR (CON REPORTE DE ERRORES REAL) ---
+# --- 3. FUNCION OCR ---
 def extraer_datos_http(image_pil, key):
+    # PASO A: Encontrar el modelo correcto para TU cuenta
+    modelo_a_usar = obtener_mejor_modelo(key)
+    st.toast(f"Usando modelo IA: {modelo_a_usar}") # Aviso en pantalla
+
+    # PASO B: Preparar imagen
     buffered = io.BytesIO()
     image_pil.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-    # SOLO usamos modelos que existen HOY (Diciembre 2025)
-    modelos_posibles = [
-        "gemini-1.5-flash",    # El más rápido y estable para texto
-        "gemini-1.5-pro",      # El más potente (backup)
-    ]
 
     prompt_text = """
     Analiza esta tarjeta de circulación. Extrae en JSON:
@@ -67,50 +95,34 @@ def extraer_datos_http(image_pil, key):
     }
     headers = {'Content-Type': 'application/json'}
 
-    # Variable para guardar TODOS los errores y mostrártelos
-    errores_acumulados = []
-
-    for modelo in modelos_posibles:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={key}"
+    # PASO C: Enviar petición
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_a_usar}:generateContent?key={key}"
+    
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data))
         
-        try:
-            response = requests.post(url, headers=headers, data=json.dumps(data))
-            
-            if response.status_code == 200:
-                result = response.json()
-                try:
-                    # Intentar leer la respuesta
-                    texto = result['candidates'][0]['content']['parts'][0]['text']
-                    
-                    # Limpiar JSON (quitar ```json y ```)
-                    if "```json" in texto:
-                        texto = texto.split("```json")[1].split("```")[0]
-                    elif "```" in texto:
-                        texto = texto.split("```")[1].split("```")[0]
-                    
-                    return json.loads(texto) # ¡ÉXITO!
-                except Exception as e:
-                    errores_acumulados.append(f"Modelo {modelo} respondió pero falló al leer el JSON: {str(e)}")
-                    continue
-            else:
-                # Si Google da error (ej. 400, 403, 404, 429)
-                error_info = response.json()
-                mensaje = error_info.get('error', {}).get('message', response.text)
-                errores_acumulados.append(f"Modelo {modelo} dió error {response.status_code}: {mensaje}")
-                continue
+        if response.status_code == 200:
+            result = response.json()
+            try:
+                texto = result['candidates'][0]['content']['parts'][0]['text']
+                if "```json" in texto:
+                    texto = texto.split("```json")[1].split("```")[0]
+                elif "```" in texto:
+                    texto = texto.split("```")[1].split("```")[0]
+                return json.loads(texto)
+            except:
+                st.error("La IA respondió pero no en formato JSON. Intenta otra foto.")
+                return None
+        else:
+            # Si falla, mostramos el error exacto y la lista de modelos que intentamos leer
+            st.error(f"Error de Google ({response.status_code}):")
+            st.code(response.text)
+            st.warning(f"Intentamos usar el modelo '{modelo_a_usar}' pero falló.")
+            return None
 
-        except Exception as e:
-            errores_acumulados.append(f"Fallo de conexión con {modelo}: {str(e)}")
-            continue
-
-    # Si llegamos aquí, NINGUNO funcionó. Mostramos el reporte completo.
-    st.error("❌ No se pudo procesar la imagen.")
-    with st.expander("Ver detalles técnicos del error (Importante)"):
-        for error in errores_acumulados:
-            st.write(f"- {error}")
-            
-    st.info("💡 Solución probable: Si el error dice 'API key not valid', revisa tu clave. Si dice 'User location is not supported', intenta usar una VPN o revisa la configuración de tu cuenta.")
-    return None
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return None
 
 # --- PDF ---
 def generar_pdf(image_pil):
@@ -118,7 +130,6 @@ def generar_pdf(image_pil):
     pdf.add_page()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         image_pil.save(tmp.name)
-        # Ajuste para media carta
         pdf.image(tmp.name, x=10, y=10, w=195, h=120) 
     pdf.set_font("Arial", size=12)
     pdf.text(10, 140, "Copia de Tarjeta de Circulación - Procesada")
@@ -135,13 +146,11 @@ if uploaded_file is not None:
         st.image(image, caption="Original", use_container_width=True)
     
     if st.button("Procesar Imagen"):
-        with st.spinner('Procesando...'):
-            # 1. Mejorar imagen
+        with st.spinner('Detectando modelo de IA y leyendo...'):
             img_mejorada = mejorar_imagen(image)
             with col2:
-                st.image(img_mejorada, caption="Mejorada (Natural)", use_container_width=True)
+                st.image(img_mejorada, caption="Mejorada", use_container_width=True)
             
-            # 2. Extraer datos
             datos = extraer_datos_http(image, api_key)
             
             if datos:
@@ -151,6 +160,5 @@ if uploaded_file is not None:
                 st.subheader("Datos Extraídos")
                 st.dataframe(df.style.map(color_rojo))
             
-            # 3. PDF
             pdf_bytes = generar_pdf(img_mejorada)
             st.download_button("Descargar PDF", pdf_bytes, "tarjeta_lista.pdf", "application/pdf")
