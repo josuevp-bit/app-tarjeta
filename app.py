@@ -12,8 +12,8 @@ import json
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Lector Tarjetas", layout="wide")
-st.title("🚗 Escáner de Tarjetas (Modo Gratuito - Flash)")
+st.set_page_config(page_title="Lector Universal", layout="wide")
+st.title("🚗 Escáner Inteligente (Auto-Detección de Modelos)")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -22,7 +22,49 @@ if not api_key:
     st.warning("Ingresa tu API Key para comenzar.")
     st.stop()
 
-# --- FUNCIONES DE IMAGEN ---
+# --- 1. FUNCIÓN MAESTRA: BUSCAR MODELO DISPONIBLE ---
+def encontrar_modelo_activo(key):
+    """Consulta a Google qué modelos tiene disponibles tu cuenta"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+    
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            st.sidebar.error(f"Error listando modelos: {response.status_code}")
+            return None
+            
+        data = response.json()
+        modelos = data.get('models', [])
+        
+        # Filtramos solo los que sirven para 'generateContent'
+        candidatos = []
+        for m in modelos:
+            if 'generateContent' in m.get('supportedGenerationMethods', []):
+                nombre_limpio = m['name'].replace('models/', '')
+                candidatos.append(nombre_limpio)
+        
+        # Lógica de Selección Inteligente
+        # 1. Preferimos 'flash' (rápido y gratis)
+        for m in candidatos:
+            if 'flash' in m and 'legacy' not in m:
+                return m
+        
+        # 2. Si no hay flash, buscamos 'pro' (pero no vision-legacy)
+        for m in candidatos:
+            if 'pro' in m and 'vision' not in m:
+                return m
+
+        # 3. Si no, devolvemos el experimental (gemini-2.0 o similar)
+        if candidatos:
+            return candidatos[0]
+            
+        return None
+
+    except Exception as e:
+        st.sidebar.error(f"Error de conexión al buscar modelos: {e}")
+        return None
+
+# --- 2. FUNCIONES DE IMAGEN ---
 def mejorar_imagen(image_pil):
     img = np.array(image_pil)
     # Ajuste suave
@@ -31,20 +73,21 @@ def mejorar_imagen(image_pil):
     img = cv2.addWeighted(img, 1.2, gaussian, -0.2, 0)
     return Image.fromarray(img)
 
-# --- FUNCION OCR (SOLO MODELOS GRATUITOS) ---
+# --- 3. FUNCION OCR ---
 def extraer_datos_http(image_pil, key):
+    # PASO A: Buscar el modelo correcto
+    modelo_elegido = encontrar_modelo_activo(key)
+    
+    if not modelo_elegido:
+        st.error("❌ Tu API Key no tiene acceso a ningún modelo de generación de contenido. Verifica en Google AI Studio.")
+        return None
+        
+    st.toast(f"🤖 Usando modelo: {modelo_elegido}")
+    
+    # PASO B: Preparar imagen
     buffered = io.BytesIO()
     image_pil.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-    # AQUÍ ESTÁ EL CAMBIO: Solo usamos "flash". 
-    # Quitamos "pro" y "latest" para evitar el error 429.
-    modelos_gratuitos = [
-        "gemini-1.5-flash",         # El estándar gratuito
-        "gemini-1.5-flash-latest",  # Su variante más nueva
-        "gemini-1.5-flash-001",     # La versión específica
-        "gemini-1.5-flash-8b"       # Versión ultra ligera (por si las otras fallan)
-    ]
 
     prompt_text = """
     Analiza esta tarjeta de circulación. Extrae en JSON:
@@ -65,48 +108,40 @@ def extraer_datos_http(image_pil, key):
     }
     headers = {'Content-Type': 'application/json'}
 
-    errores = []
-
-    for modelo in modelos_gratuitos:
-        # Pausa de seguridad de 1 segundo para no saturar si reintentamos
-        time.sleep(1) 
+    # PASO C: Intentar conectar
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_elegido}:generateContent?key={key}"
+    
+    try:
+        # Pausa de seguridad para evitar error 429 (Cuota)
+        time.sleep(2) 
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={key}"
+        response = requests.post(url, headers=headers, data=json.dumps(data))
         
-        try:
-            response = requests.post(url, headers=headers, data=json.dumps(data))
-            
-            if response.status_code == 200:
-                result = response.json()
-                try:
-                    texto = result['candidates'][0]['content']['parts'][0]['text']
-                    if "```json" in texto:
-                        texto = texto.split("```json")[1].split("```")[0]
-                    elif "```" in texto:
-                        texto = texto.split("```")[1].split("```")[0]
-                    
-                    st.toast(f"✅ Éxito usando modelo: {modelo}")
-                    return json.loads(texto)
-                except:
-                    continue
-            
-            # Si es error 429 (Resource Exhausted), es crucial esperar un poco y seguir
-            elif response.status_code == 429:
-                errores.append(f"{modelo}: Cuota excedida (429)")
-                time.sleep(2) # Esperar 2 segundos extra antes del siguiente modelo
-                continue
-            else:
-                errores.append(f"{modelo}: Error {response.status_code}")
-                continue
+        if response.status_code == 200:
+            result = response.json()
+            try:
+                texto = result['candidates'][0]['content']['parts'][0]['text']
+                if "```json" in texto:
+                    texto = texto.split("```json")[1].split("```")[0]
+                elif "```" in texto:
+                    texto = texto.split("```")[1].split("```")[0]
+                return json.loads(texto)
+            except:
+                st.error("La IA respondió pero no pudimos leer el JSON.")
+                return None
+                
+        elif response.status_code == 429:
+            st.error("⏳ Cuota excedida (Error 429). Estás usando el plan gratuito.")
+            st.info("Espera 1 minuto y vuelve a intentar. Google limita la velocidad en cuentas gratis.")
+            return None
+        else:
+            st.error(f"Error del modelo {modelo_elegido} ({response.status_code}):")
+            st.write(response.text)
+            return None
 
-        except Exception as e:
-            errores.append(f"{modelo}: {str(e)}")
-            continue
-
-    st.error("❌ No se pudo procesar. Razones:")
-    st.write(errores)
-    st.info("💡 Si ves 'Cuota excedida' en todos, espera 1 minuto y vuelve a intentar. El plan gratuito tiene límites por minuto.")
-    return None
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return None
 
 # --- PDF ---
 def generar_pdf(image_pil):
@@ -129,7 +164,7 @@ if uploaded_file is not None:
         st.image(image, caption="Original", use_container_width=True)
     
     if st.button("Procesar Imagen"):
-        with st.spinner('Procesando con modelo gratuito...'):
+        with st.spinner('Consultando modelos disponibles y leyendo...'):
             img_mejorada = mejorar_imagen(image)
             with col2:
                 st.image(img_mejorada, caption="Mejorada", use_container_width=True)
