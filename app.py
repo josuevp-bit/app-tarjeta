@@ -13,8 +13,8 @@ import json
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Scanner Pro HD", layout="wide")
-st.title("✂️ Escáner HD (Enfoque + Claridad)")
+st.set_page_config(page_title="Scanner Pro Rotar", layout="wide")
+st.title("✂️ Escáner HD (Rotar + Recortar)")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -33,25 +33,21 @@ def mejora_inteligente(image_pil):
     img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
     # 1. Reducción de Ruido Conservadora
-    # h=3 es muy bajo para no borrar texto fino, pero quita el "polvo" digital
     img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 3, 3, 7, 21)
 
     # 2. Mejora de Claridad (Solo en canal de Luz)
-    # Convertimos a LAB para tocar solo la "Luminosidad" (L) y dejar los colores (A, B) quietos
     lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     
-    # CLAHE suave: Aumenta contraste local para que las letras resalten del fondo
+    # CLAHE suave
     clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8,8))
     cl = clahe.apply(l)
     
     merged = cv2.merge((cl,a,b))
     img_cv = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
-    # 3. Enfoque "Unsharp Mask" (Técnica Fotográfica)
-    # En lugar de un filtro agresivo, restamos una versión borrosa para resaltar solo bordes
+    # 3. Enfoque "Unsharp Mask"
     gaussian = cv2.GaussianBlur(img_cv, (0, 0), 3.0)
-    # Fórmula: Original * 1.5 - Borrosa * 0.5 = Imagen con bordes definidos
     img_cv = cv2.addWeighted(img_cv, 1.5, gaussian, -0.5, 0)
 
     return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
@@ -132,16 +128,34 @@ def generar_pdf(image_pil):
 
 # --- INTERFAZ ---
 
-st.info("1. Sube tu foto y ajusta el cuadro rojo para cubrir toda la tarjeta.")
+# Inicializar estado de rotación si no existe
+if 'rotation' not in st.session_state:
+    st.session_state.rotation = 0
+
+st.info("1. Sube tu foto. Si está chueca, usa los botones para rotarla. Luego recorta.")
 uploaded_file = st.file_uploader("Subir imagen", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
     
-    # --- ÁREA DE RECORTE (PANTALLA COMPLETA) ---
+    # --- CONTROLES DE ROTACIÓN ---
+    col_rot1, col_rot2, col_rot3 = st.columns([1, 1, 4])
+    with col_rot1:
+        if st.button("↺ Rotar Izq"):
+            st.session_state.rotation += 90
+    with col_rot2:
+        if st.button("↻ Rotar Der"):
+            st.session_state.rotation -= 90
+            
+    # Aplicar rotación acumulada
+    if st.session_state.rotation != 0:
+        # expand=True hace que no se corte la imagen al girar
+        image = image.rotate(st.session_state.rotation, expand=True)
+
+    # --- ÁREA DE RECORTE ---
     st.write("### 2. Recorte Manual")
     
-    # box_color='red', aspect_ratio=None (Libre)
+    # El cropper recibe la imagen YA rotada
     cropped_img = st_cropper(image, realtime_update=True, box_color='#FF0000', aspect_ratio=None)
     
     st.write("---")
@@ -150,13 +164,13 @@ if uploaded_file is not None:
         
         col_res1, col_res2 = st.columns([1, 1])
         
-        with st.spinner('Aplicando enfoque y mejorando definición...'):
+        with st.spinner('Aplicando enfoque HD y leyendo datos...'):
             # 1. Mejora Inteligente
             img_final = mejora_inteligente(cropped_img)
             
             with col_res1:
                 st.subheader("Resultado HD")
-                st.image(img_final, caption="Tarjeta Enfocada y Aclarada", use_container_width=True)
+                st.image(img_final, caption="Tarjeta Lista", use_container_width=True)
             
             # 2. Leer datos
             datos = extraer_datos_http(img_final, api_key)
