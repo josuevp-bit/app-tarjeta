@@ -24,12 +24,13 @@ if not api_key:
     st.stop()
 
 # ==========================================
-# --- NUEVO: FUNCIÓN PARA ARREGLAR IMAGEN ---
+# --- FUNCIÓN CORREGIDA ---
 # ==========================================
 def pil_to_base64(image):
     """Convierte la imagen a texto para que el Canvas no falle nunca"""
     buffered = io.BytesIO()
-    image.save(buffered, format="RGB")
+    # CORRECCIÓN AQUÍ: Antes decía format="RGB", ahora dice format="PNG"
+    image.save(buffered, format="PNG") 
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
@@ -184,7 +185,7 @@ if uploaded_file is not None:
 
     # --- SELECCIÓN DE 4 PUNTOS ---
     st.write("### 2. Marca las 4 esquinas de la tarjeta")
-    st.info("Haz clic en las 4 esquinas de la tarjeta (en orden horario o como quieras, el sistema lo ordena).")
+    st.info("Haz clic en las 4 esquinas de la tarjeta.")
 
     # Ajuste de tamaño para visualización
     ancho_canvas = 600
@@ -194,7 +195,7 @@ if uploaded_file is not None:
     
     img_resized = image.resize((ancho_canvas, alto_canvas))
     
-    # LA CLAVE: Convertir imagen a texto para pasarla al canvas sin errores
+    # Convertir imagen a texto para pasarla al canvas sin errores
     bg_image_base64 = pil_to_base64(img_resized)
 
     # Canvas interactivo
@@ -202,7 +203,7 @@ if uploaded_file is not None:
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=Image.open(io.BytesIO(base64.b64decode(bg_image_base64.split(",")[1]))), # Pasamos la imagen decodificada de forma segura
+        background_image=Image.open(io.BytesIO(base64.b64decode(bg_image_base64.split(",")[1]))),
         update_streamlit=True,
         height=alto_canvas,
         width=ancho_canvas,
