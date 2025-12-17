@@ -4,7 +4,7 @@ import requests
 import base64
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import pandas as pd
 from fpdf import FPDF
 import io
@@ -24,15 +24,19 @@ if not api_key:
     st.stop()
 
 # ==========================================
-# --- FUNCIÓN DE IMAGEN (BASE64) ---
+# --- TRUCO PARA QUE SE VEA LA IMAGEN ---
 # ==========================================
-def pil_to_base64(image):
-    """Convierte la imagen a texto para que el Canvas no falle"""
+def imagen_para_canvas(image_pil):
+    """Prepara la imagen para que el navegador la pueda mostrar sin errores"""
+    # 1. Asegurar que sea RGB (quita transparencias raras)
+    img = image_pil.convert("RGB")
+    # 2. Guardar en memoria
     buffered = io.BytesIO()
-    # Guardamos como PNG para evitar problemas de formato
-    image.save(buffered, format="PNG") 
+    img.save(buffered, format="PNG")
+    # 3. Codificar
     img_str = base64.b64encode(buffered.getvalue()).decode()
-    return f"data:image/png;base64,{img_str}"
+    # 4. Retornar objeto Imagen compatible (NO string) para st_canvas
+    return Image.open(io.BytesIO(base64.b64decode(img_str)))
 
 # ==========================================
 # --- LÓGICA DE GEOMETRÍA ---
@@ -49,7 +53,7 @@ def ordenar_puntos(pts):
     return rect
 
 def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
-    img = np.array(image_pil)
+    img = np.array(image_pil.convert("RGB"))
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     
     pts = np.array(puntos_canvas, dtype="float32") * factor_escala
@@ -78,48 +82,42 @@ def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
 # ==========================================
 # --- MEJORA HD ---
 # ==========================================
-
 def mejora_hd(image_pil):
     img = np.array(image_pil)
     img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    
+    # Mejora suave
     img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 3, 3, 7, 21)
+    
     lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8,8))
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8,8))
     cl = clahe.apply(l)
     merged = cv2.merge((cl,a,b))
     img_cv = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+    
     gaussian = cv2.GaussianBlur(img_cv, (0, 0), 3.0)
     img_cv = cv2.addWeighted(img_cv, 1.5, gaussian, -0.5, 0)
+    
     return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
 
 # ==========================================
 # --- CONEXIÓN GOOGLE ---
 # ==========================================
-
 def encontrar_modelo_activo(key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-    try:
-        response = requests.get(url)
-        if response.status_code != 200: return 'gemini-1.5-flash'
-        data = response.json()
-        candidatos = [m['name'].replace('models/', '') for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
-        for m in candidatos: 
-            if 'flash' in m and 'legacy' not in m: return m
-        if candidatos: return candidatos[0]
-        return 'gemini-1.5-flash'
-    except: return 'gemini-1.5-flash'
+    # Forzamos flash porque es el más estable
+    return 'gemini-1.5-flash'
 
 def extraer_datos_http(image_pil, key):
     modelo_elegido = encontrar_modelo_activo(key)
     buffered = io.BytesIO()
-    image_pil.save(buffered, format="JPEG", quality=100)
+    image_pil.save(buffered, format="JPEG", quality=95)
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     prompt_text = """
     Analiza esta tarjeta de circulación. Extrae datos en JSON:
     'Propietario', 'Placa', 'Serie_VIN', 'Marca', 'Modelo', 'Año', 'Motor'.
-    Si no es visible, pon "ILEGIBLE".
+    Si no es visible, pon "ILEGIBLE". Solo responde JSON.
     """
     
     data = {"contents": [{"parts": [{"text": prompt_text}, {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}]}]}
@@ -166,7 +164,9 @@ if 'rotation' not in st.session_state: st.session_state.rotation = 0
 uploaded_file = st.file_uploader("1. Sube tu foto", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
+    # Cargar y corregir orientación EXIF automática
     image = Image.open(uploaded_file)
+    image = ImageOps.exif_transpose(image)
     
     col_r1, col_r2 = st.columns(2)
     with col_r1:
@@ -178,31 +178,33 @@ if uploaded_file is not None:
         image = image.rotate(st.session_state.rotation, expand=True)
 
     # --- SELECCIÓN DE 4 PUNTOS ---
-    st.write("### 2. Marca las 4 esquinas de la tarjeta")
+    st.write("### 2. Marca las 4 esquinas")
     st.info("Haz clic en las 4 esquinas de la tarjeta.")
 
-    # Ajuste de tamaño
-    ancho_canvas = 600
+    # Ajuste de tamaño seguro para visualización
+    # Usamos un ancho fijo de 700px para que se vea bien en laptop
+    ancho_canvas = 700
     w_original, h_original = image.size
     factor_escala = w_original / ancho_canvas
     alto_canvas = int(h_original / factor_escala)
     
+    # Redimensionamos la imagen SOLO para mostrarla en el canvas
     img_resized = image.resize((ancho_canvas, alto_canvas))
     
-    # Conversión segura
-    bg_image_base64 = pil_to_base64(img_resized)
+    # Limpiamos la imagen para evitar errores de formato
+    bg_image = imagen_para_canvas(img_resized)
 
     # Canvas
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=Image.open(io.BytesIO(base64.b64decode(bg_image_base64.split(",")[1]))),
+        background_image=bg_image, # Aquí pasamos la imagen ya curada
         update_streamlit=True,
         height=alto_canvas,
         width=ancho_canvas,
         drawing_mode="point", 
-        point_display_radius=5,
+        point_display_radius=6,
         key="canvas",
     )
 
@@ -211,34 +213,33 @@ if uploaded_file is not None:
         objects = canvas_result.json_data["objects"]
         puntos = [[obj["left"], obj["top"]] for obj in objects if obj["type"] == "circle"]
 
-    st.caption(f"Puntos seleccionados: {len(puntos)} de 4")
+    st.caption(f"Puntos marcados: {len(puntos)} / 4")
 
     if len(puntos) == 4:
-        if st.button("✅ ENDEREZAR Y PROCESAR", type="primary", use_container_width=True):
+        if st.button("✅ PROCESAR", type="primary", use_container_width=True):
             
-            with st.spinner('Enderezando y procesando...'):
+            with st.spinner('Transformando...'):
                 img_warp = enderezar_perspectiva(image, puntos, factor_escala)
                 img_final = mejora_hd(img_warp)
                 
                 col_res1, col_res2 = st.columns([1, 1])
                 
                 with col_res1:
-                    st.subheader("Tarjeta Enderezada (HD)")
+                    st.subheader("Imagen Final")
                     st.image(img_final, caption="Resultado", use_container_width=True)
                 
                 datos = extraer_datos_http(img_final, api_key)
                 
                 with col_res2:
-                    st.subheader("Datos (Editables)")
+                    st.subheader("Datos")
                     if datos:
                         df = pd.DataFrame([datos])
-                        st.info("💡 Haz doble clic para editar o copiar.")
-                        df_editado = st.data_editor(df, num_rows="dynamic")
+                        st.data_editor(df, num_rows="dynamic")
                     else:
-                        st.error("No se pudo leer el texto.")
+                        st.error("No se pudo leer texto.")
                 
                 pdf_bytes = generar_pdf(img_final)
-                st.download_button("⬇️ Descargar PDF", pdf_bytes, "tarjeta_recta.pdf", "application/pdf", use_container_width=True)
+                st.download_button("Descargar PDF", pdf_bytes, "tarjeta.pdf", "application/pdf", use_container_width=True)
     
     elif len(puntos) > 4:
-        st.warning("Marcaste demasiados puntos. Usa la flecha 'Deshacer' (↩) en el menú del canvas para borrar.")
+        st.warning("Demasiados puntos. Usa la flecha 'Deshacer' (⟲) en el menú del canvas.")
