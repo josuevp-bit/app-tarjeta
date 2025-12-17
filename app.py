@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+import requests
+import base64
 import cv2
 import numpy as np
 from PIL import Image
@@ -7,160 +8,123 @@ import pandas as pd
 from fpdf import FPDF
 import io
 import tempfile
+import json
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Lector de Tarjetas de Circulación", layout="wide")
+st.set_page_config(page_title="Lector de Tarjetas", layout="wide")
+st.title("🚗 Escáner de Tarjetas (Modo Directo)")
 
-st.title("🚗 Escáner y Mejorador de Tarjetas de Circulación")
-st.markdown("Sube tu tarjeta, obtén los datos y descarga el PDF optimizado.")
-
-# Sidebar para API Key (Para seguridad)
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
+
 if not api_key:
-    st.warning("Por favor ingresa tu API Key en la barra lateral para continuar.")
+    st.warning("Ingresa tu API Key para comenzar.")
     st.stop()
 
-genai.configure(api_key=api_key)
-
-# --- FUNCIONES DE PROCESAMIENTO DE IMAGEN ---
+# --- FUNCIONES DE IMAGEN ---
 def mejorar_imagen(image_pil):
-    # Convertir PIL a OpenCV
     img = np.array(image_pil)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-    # 1. Reducción de Ruido (Denoising)
     img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
-
-    # 2. Mejora de Nitidez (Sharpening kernel)
-    kernel = np.array([[0, -1, 0],
-                       [-1, 5,-1],
-                       [0, -1, 0]])
+    kernel = np.array([[0, -1, 0], [-1, 5,-1], [0, -1, 0]])
     img = cv2.filter2D(src=img, ddepth=-1, kernel=kernel)
-
-    # 3. Corrección de Iluminación (CLAHE - Contrast Limited Adaptive Histogram Equalization)
-    # Esto ayuda con los "rayos de luz" o zonas oscuras
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
     cl = clahe.apply(l)
     limg = cv2.merge((cl,a,b))
     img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-    # 4. Saturación (Coloreado vívido)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    s = cv2.add(s, 30) # Aumentar saturación
-    img = cv2.merge((h, s, v))
-    img = cv2.cvtColor(img, cv2.COLOR_HSV2RGB)
+# --- FUNCION OCR (CONEXIÓN DIRECTA HTTP) ---
+def extraer_datos_http(image_pil, key):
+    # 1. Convertir imagen a Base64
+    buffered = io.BytesIO()
+    image_pil.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    return Image.fromarray(img)
-
-# --- FUNCION DE EXTRACCIÓN DE DATOS (GEMINI) ---
-# --- FUNCION DE EXTRACCIÓN DE DATOS (A PRUEBA DE FALLOS) ---
-def extraer_datos(image_pil):
-    # Lista de modelos para probar en orden de prioridad
-    modelos_a_probar = [
-        'gemini-1.5-flash',
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-flash-001',
-        'gemini-pro-vision',  # Modelo antiguo pero confiable
-    ]
-
-    prompt = """
-    Actúa como un sistema OCR experto en tarjetas de circulación mexicanas.
-    Analiza esta imagen y extrae la siguiente información en formato JSON estricto.
-    Campos requeridos: 'Propietario', 'Placa', 'Serie_VIN', 'Marca', 'Modelo', 'Año', 'Motor'.
+    # 2. Preparar la petición directa a Google
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
     
-    Reglas:
-    1. Si un dato es legible, escríbelo tal cual.
-    2. Si un dato NO es legible o está borroso, escribe exactamente la palabra "ILEGIBLE".
-    3. No inventes datos.
-    Solo devuelve el JSON, nada de texto extra.
+    headers = {'Content-Type': 'application/json'}
+    
+    prompt_text = """
+    Analiza esta tarjeta de circulación. Extrae en JSON:
+    'Propietario', 'Placa', 'Serie_VIN', 'Marca', 'Modelo', 'Año', 'Motor'.
+    Si no se lee, pon "ILEGIBLE". Solo JSON.
     """
+    
+    data = {
+        "contents": [{
+            "parts": [
+                {"text": prompt_text},
+                {"inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": img_str
+                }}
+            ]
+        }]
+    }
 
-    for nombre_modelo in modelos_a_probar:
+    # 3. Enviar petición
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        
+        if response.status_code != 200:
+            st.error(f"Error de Google ({response.status_code}): {response.text}")
+            return None
+            
+        # 4. Procesar respuesta
+        result = response.json()
         try:
-            # Intentamos cargar el modelo actual del ciclo
-            model = genai.GenerativeModel(nombre_modelo)
-            
-            # Intentamos generar el contenido
-            response = model.generate_content([prompt, image_pil])
-            
-            # Si llegamos aquí, funcionó. Procesamos el texto.
-            text = response.text
-            # Limpieza para asegurar que solo quede el JSON
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-                
-            return eval(text.strip()) # Devolvemos los datos y rompemos el ciclo
-            
-        except Exception as e:
-            # Si falla, imprimimos un aviso invisible y probamos el siguiente modelo
-            print(f"Fallo con modelo {nombre_modelo}: {e}")
-            continue 
+            texto_respuesta = result['candidates'][0]['content']['parts'][0]['text']
+            # Limpiar JSON
+            if "```json" in texto_respuesta:
+                texto_respuesta = texto_respuesta.split("```json")[1].split("```")[0]
+            elif "```" in texto_respuesta:
+                texto_respuesta = texto_respuesta.split("```")[1].split("```")[0]
+            return json.loads(texto_respuesta)
+        except:
+            st.error("Google respondió, pero no se pudo entender el formato. Intenta otra foto.")
+            return None
 
-    # Si sale del ciclo y no retornó nada, es que fallaron todos
-    st.error("Error: Se intentaron 4 modelos de IA diferentes y todos fallaron. Verifica que tu API Key sea correcta y no tenga espacios extra.")
-    return None
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
+        return None
 
-# --- FUNCION PDF ---
+# --- PDF ---
 def generar_pdf(image_pil):
     pdf = FPDF(orientation='P', unit='mm', format='Letter')
     pdf.add_page()
-    
-    # Guardar imagen temporalmente
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         image_pil.save(tmp.name)
-        
-        # Tamaño carta es aprox 216x279 mm. Media hoja es 216 x 140.
-        # Ajustamos la imagen para que ocupe la mitad superior (aprox 190mm de ancho para márgenes)
         pdf.image(tmp.name, x=10, y=10, w=195, h=120) 
-        
     pdf.set_font("Arial", size=12)
-    pdf.text(10, 140, "Copia de Tarjeta de Circulación - Verificación")
-    
+    pdf.text(10, 140, "Copia de Tarjeta de Circulación - Procesada")
     return pdf.output(dest='S').encode('latin1')
 
 # --- INTERFAZ ---
-uploaded_file = st.file_uploader("Sube la foto de la Tarjeta", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("Sube la Tarjeta", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
-    
     col1, col2 = st.columns(2)
     with col1:
         st.image(image, caption="Original", use_container_width=True)
     
-    with st.spinner('Mejorando imagen y leyendo datos...'):
-        # 1. Procesar Imagen
-        img_mejorada = mejorar_imagen(image)
-        
-        with col2:
-            st.image(img_mejorada, caption="Mejorada (Nitidez + Luz)", use_container_width=True)
-        
-        # 2. Extraer Datos
-        datos = extraer_datos(image)
-        
-        if datos:
-            df = pd.DataFrame([datos])
+    if st.button("Procesar Imagen"):
+        with st.spinner('Procesando...'):
+            img_mejorada = mejorar_imagen(image)
+            with col2:
+                st.image(img_mejorada, caption="Mejorada", use_container_width=True)
             
-            # Lógica para marcar en rojo (Styling)
-            def color_rojo_si_ilegible(val):
-                color = 'background-color: #ffcccc; color: red; font-weight: bold' if str(val).upper() == 'ILEGIBLE' else ''
-                return color
-
-            st.subheader("📋 Datos Extraídos (Copia y Pega)")
-            st.dataframe(df.style.map(color_rojo_si_ilegible))
-        else:
-            st.error("No se pudieron leer los datos. Intenta con una foto más clara.")
-
-        # 3. Descargar PDF
-        pdf_bytes = generar_pdf(img_mejorada)
-        st.download_button(
-            label="📄 Descargar PDF (Media Carta)",
-            data=pdf_bytes,
-            file_name="tarjeta_circulacion_mejorada.pdf",
-            mime="application/pdf"
-        )
+            datos = extraer_datos_http(image, api_key)
+            
+            if datos:
+                df = pd.DataFrame([datos])
+                def color_rojo(val):
+                    return 'background-color: #ffcccc; color: red; font-weight: bold' if str(val).upper() == 'ILEGIBLE' else ''
+                st.subheader("Datos Extraídos")
+                st.dataframe(df.style.map(color_rojo))
+            
+            pdf_bytes = generar_pdf(img_mejorada)
+            st.download_button("Descargar PDF", pdf_bytes, "tarjeta.pdf", "application/pdf")
