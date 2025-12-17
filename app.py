@@ -56,10 +56,16 @@ def mejorar_imagen(image_pil):
     return Image.fromarray(img)
 
 # --- FUNCION DE EXTRACCIÓN DE DATOS (GEMINI) ---
+# --- FUNCION DE EXTRACCIÓN DE DATOS (A PRUEBA DE FALLOS) ---
 def extraer_datos(image_pil):
-    # ¡Nota los 4 espacios antes de la palabra model!
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-    
+    # Lista de modelos para probar en orden de prioridad
+    modelos_a_probar = [
+        'gemini-1.5-flash',
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-flash-001',
+        'gemini-pro-vision',  # Modelo antiguo pero confiable
+    ]
+
     prompt = """
     Actúa como un sistema OCR experto en tarjetas de circulación mexicanas.
     Analiza esta imagen y extrae la siguiente información en formato JSON estricto.
@@ -69,15 +75,35 @@ def extraer_datos(image_pil):
     1. Si un dato es legible, escríbelo tal cual.
     2. Si un dato NO es legible o está borroso, escribe exactamente la palabra "ILEGIBLE".
     3. No inventes datos.
+    Solo devuelve el JSON, nada de texto extra.
     """
-    
-    response = model.generate_content([prompt, image_pil])
-    try:
-        # Limpieza básica para obtener el JSON del texto
-        text = response.text.replace("```json", "").replace("```", "")
-        return eval(text) # Convertir string a dict
-    except:
-        return None
+
+    for nombre_modelo in modelos_a_probar:
+        try:
+            # Intentamos cargar el modelo actual del ciclo
+            model = genai.GenerativeModel(nombre_modelo)
+            
+            # Intentamos generar el contenido
+            response = model.generate_content([prompt, image_pil])
+            
+            # Si llegamos aquí, funcionó. Procesamos el texto.
+            text = response.text
+            # Limpieza para asegurar que solo quede el JSON
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+                
+            return eval(text.strip()) # Devolvemos los datos y rompemos el ciclo
+            
+        except Exception as e:
+            # Si falla, imprimimos un aviso invisible y probamos el siguiente modelo
+            print(f"Fallo con modelo {nombre_modelo}: {e}")
+            continue 
+
+    # Si sale del ciclo y no retornó nada, es que fallaron todos
+    st.error("Error: Se intentaron 4 modelos de IA diferentes y todos fallaron. Verifica que tu API Key sea correcta y no tenga espacios extra.")
+    return None
 
 # --- FUNCION PDF ---
 def generar_pdf(image_pil):
