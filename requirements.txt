@@ -5,3 +5,4 @@ numpy
 Pillow
 fpdf
 pandas
+streamlit-cropper
