@@ -1,18 +1,41 @@
 import streamlit as st
-from streamlit_drawable_canvas import st_canvas
-import requests
-import base64
-import cv2
-import numpy as np
-from PIL import Image, ImageOps
-import pandas as pd
-from fpdf import FPDF
 import io
-import tempfile
+import base64
+from PIL import Image, ImageOps
+import numpy as np
+import cv2
+import pandas as pd
+import requests
 import json
 import time
+import tempfile
+from fpdf import FPDF
 
+# ==========================================
+# --- PARCHE DE COMPATIBILIDAD (EL ARREGLO) ---
+# ==========================================
+# Esto arregla el error "AttributeError" re-creando la función que Streamlit eliminó.
+try:
+    import streamlit.elements.image as st_image
+    if not hasattr(st_image, 'image_to_url'):
+        def image_to_url(image, width, clamp, channels, output_format, image_id, allow_emoji=True):
+            """Esta función engaña a la librería para que funcione en servidores nuevos."""
+            if isinstance(image, Image.Image):
+                buffered = io.BytesIO()
+                image.save(buffered, format="PNG")
+                img_str = base64.b64encode(buffered.getvalue()).decode()
+                return f"data:image/png;base64,{img_str}"
+            return ""
+        st_image.image_to_url = image_to_url
+except ImportError:
+    pass # Si falla el parche, intentamos seguir
+
+# AHORA SÍ IMPORTAMOS EL CANVAS (Después del parche)
+from streamlit_drawable_canvas import st_canvas
+
+# ==========================================
 # --- CONFIGURACIÓN ---
+# ==========================================
 st.set_page_config(page_title="Scanner 4 Puntos", layout="wide")
 st.title("📐 Escáner de Perspectiva (4 Puntos)")
 
@@ -28,14 +51,10 @@ if not api_key:
 # ==========================================
 def imagen_para_canvas(image_pil):
     """Prepara la imagen para que el navegador la pueda mostrar sin errores"""
-    # 1. Asegurar que sea RGB (quita transparencias raras)
     img = image_pil.convert("RGB")
-    # 2. Guardar en memoria
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
-    # 3. Codificar
     img_str = base64.b64encode(buffered.getvalue()).decode()
-    # 4. Retornar objeto Imagen compatible (NO string) para st_canvas
     return Image.open(io.BytesIO(base64.b64decode(img_str)))
 
 # ==========================================
@@ -164,7 +183,6 @@ if 'rotation' not in st.session_state: st.session_state.rotation = 0
 uploaded_file = st.file_uploader("1. Sube tu foto", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
-    # Cargar y corregir orientación EXIF automática
     image = Image.open(uploaded_file)
     image = ImageOps.exif_transpose(image)
     
@@ -181,17 +199,15 @@ if uploaded_file is not None:
     st.write("### 2. Marca las 4 esquinas")
     st.info("Haz clic en las 4 esquinas de la tarjeta.")
 
-    # Ajuste de tamaño seguro para visualización
-    # Usamos un ancho fijo de 700px para que se vea bien en laptop
+    # Ajuste de tamaño
     ancho_canvas = 700
     w_original, h_original = image.size
     factor_escala = w_original / ancho_canvas
     alto_canvas = int(h_original / factor_escala)
     
-    # Redimensionamos la imagen SOLO para mostrarla en el canvas
     img_resized = image.resize((ancho_canvas, alto_canvas))
     
-    # Limpiamos la imagen para evitar errores de formato
+    # Imagen segura
     bg_image = imagen_para_canvas(img_resized)
 
     # Canvas
@@ -199,7 +215,7 @@ if uploaded_file is not None:
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=bg_image, # Aquí pasamos la imagen ya curada
+        background_image=bg_image,
         update_streamlit=True,
         height=alto_canvas,
         width=ancho_canvas,
