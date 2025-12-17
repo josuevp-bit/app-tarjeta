@@ -24,11 +24,20 @@ if not api_key:
     st.stop()
 
 # ==========================================
+# --- NUEVO: FUNCIÓN PARA ARREGLAR IMAGEN ---
+# ==========================================
+def pil_to_base64(image):
+    """Convierte la imagen a texto para que el Canvas no falle nunca"""
+    buffered = io.BytesIO()
+    image.save(buffered, format="RGB")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_str}"
+
+# ==========================================
 # --- LÓGICA DE GEOMETRÍA (4 PUNTOS) ---
 # ==========================================
 
 def ordenar_puntos(pts):
-    # Ordena las coordenadas: arriba-izq, arriba-der, abajo-der, abajo-izq
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)] # TL
@@ -42,12 +51,12 @@ def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
     img = np.array(image_pil)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     
-    # Escalar puntos del canvas (pequeño) a la imagen original (grande)
+    # Escalar puntos
     pts = np.array(puntos_canvas, dtype="float32") * factor_escala
     rect = ordenar_puntos(pts)
     (tl, tr, br, bl) = rect
 
-    # Calcular dimensiones del nuevo rectángulo
+    # Calcular dimensiones
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
     maxWidth = max(int(widthA), int(widthB))
@@ -56,14 +65,12 @@ def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
     heightB = np.sqrt(((tl[1] - bl[1]) ** 2) + ((tl[0] - bl[0]) ** 2))
     maxHeight = max(int(heightA), int(heightB))
 
-    # Matriz de destino
     dst = np.array([
         [0, 0],
         [maxWidth - 1, 0],
         [maxWidth - 1, maxHeight - 1],
         [0, maxHeight - 1]], dtype="float32")
 
-    # La magia: Transformación de Perspectiva
     M = cv2.getPerspectiveTransform(rect, dst)
     warped = cv2.warpPerspective(img, M, (maxWidth, maxHeight))
     
@@ -76,16 +83,16 @@ def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
 def mejora_hd(image_pil):
     img = np.array(image_pil)
     img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    # Limpieza suave
+    # 1. Limpieza suave
     img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 3, 3, 7, 21)
-    # Ajuste Luz
+    # 2. Ajuste Luz (CLAHE)
     lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8,8))
     cl = clahe.apply(l)
     merged = cv2.merge((cl,a,b))
     img_cv = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-    # Enfoque
+    # 3. Enfoque
     gaussian = cv2.GaussianBlur(img_cv, (0, 0), 3.0)
     img_cv = cv2.addWeighted(img_cv, 1.5, gaussian, -0.5, 0)
     return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
@@ -177,26 +184,29 @@ if uploaded_file is not None:
 
     # --- SELECCIÓN DE 4 PUNTOS ---
     st.write("### 2. Marca las 4 esquinas de la tarjeta")
-    st.info("Haz clic en las 4 esquinas de la tarjeta. Si te equivocas, usa el botón de deshacer en la barra de herramientas del canvas.")
+    st.info("Haz clic en las 4 esquinas de la tarjeta (en orden horario o como quieras, el sistema lo ordena).")
 
-    # Redimensionar para mostrar en pantalla sin que sea gigante
+    # Ajuste de tamaño para visualización
     ancho_canvas = 600
     w_original, h_original = image.size
     factor_escala = w_original / ancho_canvas
     alto_canvas = int(h_original / factor_escala)
     
     img_resized = image.resize((ancho_canvas, alto_canvas))
+    
+    # LA CLAVE: Convertir imagen a texto para pasarla al canvas sin errores
+    bg_image_base64 = pil_to_base64(img_resized)
 
     # Canvas interactivo
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
         stroke_color="#FF0000",
-        background_image=img_resized,
+        background_image=Image.open(io.BytesIO(base64.b64decode(bg_image_base64.split(",")[1]))), # Pasamos la imagen decodificada de forma segura
         update_streamlit=True,
         height=alto_canvas,
         width=ancho_canvas,
-        drawing_mode="point", # Modo puntos
+        drawing_mode="point", 
         point_display_radius=5,
         key="canvas",
     )
@@ -212,7 +222,7 @@ if uploaded_file is not None:
     if len(puntos) == 4:
         if st.button("✅ ENDEREZAR Y PROCESAR", type="primary", use_container_width=True):
             
-            with st.spinner('Enderezando perspectiva, mejorando calidad y leyendo...'):
+            with st.spinner('Enderezando y procesando...'):
                 # 1. Enderezar
                 img_warp = enderezar_perspectiva(image, puntos, factor_escala)
                 
@@ -223,7 +233,7 @@ if uploaded_file is not None:
                 
                 with col_res1:
                     st.subheader("Tarjeta Enderezada (HD)")
-                    st.image(img_final, caption="Lista para imprimir", use_container_width=True)
+                    st.image(img_final, caption="Resultado", use_container_width=True)
                 
                 # 3. Leer
                 datos = extraer_datos_http(img_final, api_key)
@@ -232,17 +242,14 @@ if uploaded_file is not None:
                     st.subheader("Datos (Editables)")
                     if datos:
                         df = pd.DataFrame([datos])
-                        
-                        # USAMOS DATA_EDITOR PARA PODER COPIAR Y EDITAR
-                        st.info("💡 Haz doble clic en una celda para editar o copiar texto parcial.")
+                        st.info("💡 Haz doble clic para editar o copiar.")
                         df_editado = st.data_editor(df, num_rows="dynamic")
                     else:
                         st.error("No se pudo leer el texto.")
                 
                 # 4. PDF
                 pdf_bytes = generar_pdf(img_final)
-                st.success("¡Proceso completado!")
                 st.download_button("⬇️ Descargar PDF", pdf_bytes, "tarjeta_recta.pdf", "application/pdf", use_container_width=True)
     
     elif len(puntos) > 4:
-        st.warning("Has marcado más de 4 puntos. Usa la flecha 'Deshacer' en el canvas (arriba a la izquierda de la imagen) para dejar solo 4.")
+        st.warning("Marcaste demasiados puntos. Usa la flecha 'Deshacer' (↩) en el menú del canvas para borrar.")
