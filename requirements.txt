@@ -1,0 +1,7 @@
+streamlit
+google-generativeai
+opencv-python-headless
+numpy
+Pillow
+fpdf
+pandas
