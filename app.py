@@ -13,8 +13,8 @@ import json
 import time
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Scanner Manual Pro", layout="wide")
-st.title("✂️ Escáner de Alta Precisión")
+st.set_page_config(page_title="Scanner Pro HD", layout="wide")
+st.title("✂️ Escáner HD (Enfoque + Claridad)")
 
 # Sidebar
 api_key = st.sidebar.text_input("Ingresa tu Google Gemini API Key", type="password")
@@ -24,18 +24,37 @@ if not api_key:
     st.stop()
 
 # ==========================================
-# --- MEJORA DE IMAGEN (SOLO LUZ, SIN BORRAR DETALLES) ---
+# --- MEJORA INTELIGENTE (HD NATURAL) ---
 # ==========================================
 
-def mejora_natural(image_pil):
-    # Convertimos a OpenCV
+def mejora_inteligente(image_pil):
+    # Convertir PIL a OpenCV
     img = np.array(image_pil)
+    img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # 1. Reducción de Ruido Conservadora
+    # h=3 es muy bajo para no borrar texto fino, pero quita el "polvo" digital
+    img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 3, 3, 7, 21)
+
+    # 2. Mejora de Claridad (Solo en canal de Luz)
+    # Convertimos a LAB para tocar solo la "Luminosidad" (L) y dejar los colores (A, B) quietos
+    lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
     
-    # Solo ajustamos un poco el brillo y contraste para que no se vea oscura
-    # No usamos filtros de desenfoque ni "pintura al oleo"
-    img = cv2.convertScaleAbs(img, alpha=1.1, beta=10) # alpha=1.1 (poquito contraste), beta=10 (poquito brillo)
+    # CLAHE suave: Aumenta contraste local para que las letras resalten del fondo
+    clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8,8))
+    cl = clahe.apply(l)
     
-    return Image.fromarray(img)
+    merged = cv2.merge((cl,a,b))
+    img_cv = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+    # 3. Enfoque "Unsharp Mask" (Técnica Fotográfica)
+    # En lugar de un filtro agresivo, restamos una versión borrosa para resaltar solo bordes
+    gaussian = cv2.GaussianBlur(img_cv, (0, 0), 3.0)
+    # Fórmula: Original * 1.5 - Borrosa * 0.5 = Imagen con bordes definidos
+    img_cv = cv2.addWeighted(img_cv, 1.5, gaussian, -0.5, 0)
+
+    return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
 
 # ==========================================
 # --- CONEXIÓN GOOGLE (OCR) ---
@@ -58,7 +77,7 @@ def encontrar_modelo_activo(key):
 def extraer_datos_http(image_pil, key):
     modelo_elegido = encontrar_modelo_activo(key)
     buffered = io.BytesIO()
-    image_pil.save(buffered, format="JPEG", quality=100) # Calidad máxima
+    image_pil.save(buffered, format="JPEG", quality=100)
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     prompt_text = """
@@ -113,36 +132,31 @@ def generar_pdf(image_pil):
 
 # --- INTERFAZ ---
 
-st.info("1. Sube tu foto y recorta manualmente la tarjeta.")
+st.info("1. Sube tu foto y ajusta el cuadro rojo para cubrir toda la tarjeta.")
 uploaded_file = st.file_uploader("Subir imagen", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
     
     # --- ÁREA DE RECORTE (PANTALLA COMPLETA) ---
-    st.write("### 2. Ajusta el recuadro rojo")
-    st.caption("Usa las esquinas para seleccionar la tarjeta. Ahora tienes más espacio.")
+    st.write("### 2. Recorte Manual")
     
-    # EL CAMBIO CLAVE: Quitamos las columnas.
-    # box_color='red' es el color del cuadro.
-    # aspect_ratio=None permite cualquier forma (no fuerza cuadrado).
+    # box_color='red', aspect_ratio=None (Libre)
     cropped_img = st_cropper(image, realtime_update=True, box_color='#FF0000', aspect_ratio=None)
     
     st.write("---")
     
-    # Botón grande
-    if st.button("✅ RECORTAR Y EXTRAER DATOS", type="primary", use_container_width=True):
+    if st.button("✅ PROCESAR IMAGEN", type="primary", use_container_width=True):
         
-        # --- RESULTADOS (AQUÍ SÍ USAMOS COLUMNAS) ---
         col_res1, col_res2 = st.columns([1, 1])
         
-        with st.spinner('Procesando imagen en alta calidad...'):
-            # 1. Mejora sutil (respetando calidad original)
-            img_final = mejora_natural(cropped_img)
+        with st.spinner('Aplicando enfoque y mejorando definición...'):
+            # 1. Mejora Inteligente
+            img_final = mejora_inteligente(cropped_img)
             
             with col_res1:
-                st.subheader("Imagen Final")
-                st.image(img_final, caption="Tarjeta Lista", use_container_width=True)
+                st.subheader("Resultado HD")
+                st.image(img_final, caption="Tarjeta Enfocada y Aclarada", use_container_width=True)
             
             # 2. Leer datos
             datos = extraer_datos_http(img_final, api_key)
@@ -155,9 +169,9 @@ if uploaded_file is not None:
                         return 'background-color: #ffcccc; color: red; font-weight: bold' if str(val).upper() == 'ILEGIBLE' else ''
                     st.dataframe(df.style.map(color_rojo))
                 else:
-                    st.error("No se pudieron extraer datos. Verifica que el recorte incluya el texto.")
+                    st.error("No se pudieron extraer datos.")
 
             # 3. PDF
             pdf_bytes = generar_pdf(img_final)
-            st.success("¡Proceso terminado!")
-            st.download_button("⬇️ Descargar PDF Listo para Imprimir", pdf_bytes, "tarjeta_imprimir.pdf", "application/pdf", use_container_width=True)
+            st.success("¡Imagen mejorada con éxito!")
+            st.download_button("⬇️ Descargar PDF", pdf_bytes, "tarjeta_hd.pdf", "application/pdf", use_container_width=True)
