@@ -35,18 +35,21 @@ def mejorar_imagen(image_pil):
     img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
     return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-# --- FUNCION OCR (CONEXIÓN DIRECTA HTTP) ---
+# --- FUNCION OCR (CONEXIÓN DIRECTA MULTI-INTENTO) ---
 def extraer_datos_http(image_pil, key):
     # 1. Convertir imagen a Base64
     buffered = io.BytesIO()
     image_pil.save(buffered, format="JPEG")
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
-    # 2. Preparar la petición directa a Google
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
-    
-    headers = {'Content-Type': 'application/json'}
-    
+    # Lista de modelos para probar (si falla uno, sigue al otro)
+    modelos_posibles = [
+        "gemini-1.5-flash-latest", # Opción 1: La más nueva
+        "gemini-1.5-flash-001",    # Opción 2: La versión estable específica
+        "gemini-1.5-flash",        # Opción 3: La estándar
+        "gemini-1.5-pro"           # Opción 4: La versión Pro (más potente)
+    ]
+
     prompt_text = """
     Analiza esta tarjeta de circulación. Extrae en JSON:
     'Propietario', 'Placa', 'Serie_VIN', 'Marca', 'Modelo', 'Año', 'Motor'.
@@ -64,14 +67,40 @@ def extraer_datos_http(image_pil, key):
             ]
         }]
     }
+    
+    headers = {'Content-Type': 'application/json'}
 
-    # 3. Enviar petición
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
+    # Bucle de intentos
+    for modelo in modelos_posibles:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={key}"
         
-        if response.status_code != 200:
-            st.error(f"Error de Google ({response.status_code}): {response.text}")
-            return None
+        try:
+            # print(f"Probando modelo: {modelo}...") # (Opcional para depurar)
+            response = requests.post(url, headers=headers, data=json.dumps(data))
+            
+            if response.status_code == 200:
+                # ¡ÉXITO!
+                result = response.json()
+                try:
+                    texto_respuesta = result['candidates'][0]['content']['parts'][0]['text']
+                    # Limpiar JSON
+                    if "```json" in texto_respuesta:
+                        texto_respuesta = texto_respuesta.split("```json")[1].split("```")[0]
+                    elif "```" in texto_respuesta:
+                        texto_respuesta = texto_respuesta.split("```")[1].split("```")[0]
+                    return json.loads(texto_respuesta)
+                except:
+                    continue # Si la respuesta está rota, probamos el siguiente
+            else:
+                # Si error es 404 (modelo no encontrado), seguimos al siguiente
+                continue
+
+        except Exception as e:
+            continue
+
+    # Si llegamos aquí, fallaron los 4 modelos
+    st.error("Error: Se probaron 4 versiones del modelo de Google y ninguna respondió. Verifica tu API Key o intenta más tarde.")
+    return None
             
         # 4. Procesar respuesta
         result = response.json()
