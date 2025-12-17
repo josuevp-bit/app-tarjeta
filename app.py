@@ -57,7 +57,8 @@ def mejorar_imagen(image_pil):
 
 # --- FUNCION DE EXTRACCIÓN DE DATOS (GEMINI) ---
 def extraer_datos(image_pil):
-    model = genai.GenerativeModel('gemini-pro-vision')
+    # Intentamos usar la versión 'latest' que suele estar siempre disponible
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     prompt = """
     Actúa como un sistema OCR experto en tarjetas de circulación mexicanas.
