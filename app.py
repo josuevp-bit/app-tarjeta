@@ -24,18 +24,18 @@ if not api_key:
     st.stop()
 
 # ==========================================
-# --- FUNCIÓN CORREGIDA ---
+# --- FUNCIÓN DE IMAGEN (BASE64) ---
 # ==========================================
 def pil_to_base64(image):
-    """Convierte la imagen a texto para que el Canvas no falle nunca"""
+    """Convierte la imagen a texto para que el Canvas no falle"""
     buffered = io.BytesIO()
-    # CORRECCIÓN AQUÍ: Antes decía format="RGB", ahora dice format="PNG"
+    # Guardamos como PNG para evitar problemas de formato
     image.save(buffered, format="PNG") 
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
 # ==========================================
-# --- LÓGICA DE GEOMETRÍA (4 PUNTOS) ---
+# --- LÓGICA DE GEOMETRÍA ---
 # ==========================================
 
 def ordenar_puntos(pts):
@@ -52,12 +52,10 @@ def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
     img = np.array(image_pil)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     
-    # Escalar puntos
     pts = np.array(puntos_canvas, dtype="float32") * factor_escala
     rect = ordenar_puntos(pts)
     (tl, tr, br, bl) = rect
 
-    # Calcular dimensiones
     widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
     widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
     maxWidth = max(int(widthA), int(widthB))
@@ -84,16 +82,13 @@ def enderezar_perspectiva(image_pil, puntos_canvas, factor_escala):
 def mejora_hd(image_pil):
     img = np.array(image_pil)
     img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    # 1. Limpieza suave
     img_cv = cv2.fastNlMeansDenoisingColored(img_cv, None, 3, 3, 7, 21)
-    # 2. Ajuste Luz (CLAHE)
     lab = cv2.cvtColor(img_cv, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(8,8))
     cl = clahe.apply(l)
     merged = cv2.merge((cl,a,b))
     img_cv = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-    # 3. Enfoque
     gaussian = cv2.GaussianBlur(img_cv, (0, 0), 3.0)
     img_cv = cv2.addWeighted(img_cv, 1.5, gaussian, -0.5, 0)
     return Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
@@ -171,7 +166,6 @@ if 'rotation' not in st.session_state: st.session_state.rotation = 0
 uploaded_file = st.file_uploader("1. Sube tu foto", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file is not None:
-    # Cargar y rotar
     image = Image.open(uploaded_file)
     
     col_r1, col_r2 = st.columns(2)
@@ -187,7 +181,7 @@ if uploaded_file is not None:
     st.write("### 2. Marca las 4 esquinas de la tarjeta")
     st.info("Haz clic en las 4 esquinas de la tarjeta.")
 
-    # Ajuste de tamaño para visualización
+    # Ajuste de tamaño
     ancho_canvas = 600
     w_original, h_original = image.size
     factor_escala = w_original / ancho_canvas
@@ -195,10 +189,10 @@ if uploaded_file is not None:
     
     img_resized = image.resize((ancho_canvas, alto_canvas))
     
-    # Convertir imagen a texto para pasarla al canvas sin errores
+    # Conversión segura
     bg_image_base64 = pil_to_base64(img_resized)
 
-    # Canvas interactivo
+    # Canvas
     canvas_result = st_canvas(
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=3,
@@ -212,7 +206,6 @@ if uploaded_file is not None:
         key="canvas",
     )
 
-    # Verificar puntos
     puntos = []
     if canvas_result.json_data is not None:
         objects = canvas_result.json_data["objects"]
@@ -224,10 +217,7 @@ if uploaded_file is not None:
         if st.button("✅ ENDEREZAR Y PROCESAR", type="primary", use_container_width=True):
             
             with st.spinner('Enderezando y procesando...'):
-                # 1. Enderezar
                 img_warp = enderezar_perspectiva(image, puntos, factor_escala)
-                
-                # 2. Mejorar
                 img_final = mejora_hd(img_warp)
                 
                 col_res1, col_res2 = st.columns([1, 1])
@@ -236,7 +226,6 @@ if uploaded_file is not None:
                     st.subheader("Tarjeta Enderezada (HD)")
                     st.image(img_final, caption="Resultado", use_container_width=True)
                 
-                # 3. Leer
                 datos = extraer_datos_http(img_final, api_key)
                 
                 with col_res2:
@@ -248,7 +237,6 @@ if uploaded_file is not None:
                     else:
                         st.error("No se pudo leer el texto.")
                 
-                # 4. PDF
                 pdf_bytes = generar_pdf(img_final)
                 st.download_button("⬇️ Descargar PDF", pdf_bytes, "tarjeta_recta.pdf", "application/pdf", use_container_width=True)
     
