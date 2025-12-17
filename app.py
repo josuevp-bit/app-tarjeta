@@ -57,7 +57,6 @@ def mejorar_imagen(image_pil):
 
 # --- FUNCION DE EXTRACCIÓN DE DATOS (GEMINI) ---
 def extraer_datos(image_pil):
-    # Intentamos usar la versión 'latest' que suele estar siempre disponible
 model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     prompt = """
