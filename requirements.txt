@@ -1,8 +1,8 @@
 streamlit
-streamlit-drawable-canvas
+streamlit-cropper
 requests
 opencv-python-headless
-numpy<2
+numpy
 Pillow
 fpdf
 pandas
